@@ -2,7 +2,7 @@ import vk_api
 import random
 from psycopg2 import sql
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 from vk_api.longpoll import VkLongPoll, VkEventType
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 import json
@@ -23,17 +23,6 @@ user_id = text['vk']['user_id']
 user_id_int = text['vk']['user_id_int']
 
 connection_parameters = text['db']
-
-def update_balance_analiz(type, balance):
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        values = [(type, balance, datetime.today())]
-        conn.autocommit = True
-        insert = sql.SQL(
-            'INSERT INTO money_analiz (type,balance,date) VALUES {}').format(
-                sql.SQL(',').join(map(sql.Literal, values)))
-        cursor.execute(insert)
-
 
 # Удаление последнего
 def delete_last():
@@ -57,103 +46,42 @@ def write_msg(message):
             'keyboard': json.dumps({'buttons': []})
         })
 
-
-# Выборка Всего баланса
-def select_from_acc(message):
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        cursor.execute("select balance,name from money_account ORDER BY code")
-        for row in cursor:
-            message += row[1] + ' ' + row[0] + '\n'
-    conn.close()
-    return message
-
-
-# Обновление баланса счета
-def update_money_acc(balance, type):
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        conn.autocommit = True
-        update = sql.SQL("update money_account set balance ='" + str(balance) +
-                         "' where name = '" + type + "'")
-        cursor.execute(update)
-    conn.close()
-
-
-# Выборка баланса
-def select_balance(type):
-    balance = 0
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        cursor.execute("select balance from money_account where name = '" +
-                       type + "'")
-        for row in cursor:
-            balance = int(row[0])
-    conn.close()
-    return balance
-
-
-# Выборка имени счета
-def select_name_from_acc(synonym):
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        cursor.execute("select name from money_account where POSITION ('" +
-                       synonym + "' in synonyms) <> '0'")
-        if (cursor.rowcount == 0):
-            write_msg('Неправильно указан счет')
-            type = 'false'
-        for row in cursor:
-            type = row[0]
-    conn.close()
-    return type
-
-
-# Проверка есть ли комент
-def check_comment(commentar):
-    comment = ''
-    if len(commentar) > 1:
-        comment = commentar[1]
-    return comment
-
-
-# Помощь
-def help():
-    conn = psycopg2.connect(**connection_parameters)
-    with conn.cursor() as cursor:
-        message = 'Напоминалка\nСчета:\n'
-        cursor.execute("select name,synonyms from money_account order by name")
-        for row in cursor:
-            message += row[0] + ' ' + row[1] + '\n'
-    with conn.cursor() as cursor:
-        message += 'Расходы:\n'
-        cursor.execute(
-            "select name,synonyms,view from money_category_types where view='Расходы' order by name"
-        )
-        for row in cursor:
-            message += row[0] + ' ' + row[1] + '\n'
-    with conn.cursor() as cursor:
-        message += 'Доходы:\n'
-        cursor.execute(
-            "select name,synonyms,view from money_category_types where view='Доходы' order by name"
-        )
-        for row in cursor:
-            message += row[0] + ' ' + row[1] + '\n'
-    conn.close()
-    message += 'Примеры:\nСбер 100 еда или Перевод сбер вклад 1000'
-    return message
-
-
 def select_delta_date(type, firstdate):
+    dates = ''
+    typeSQL = 0
+    if(not isinstance(firstdate, str)):
+        firstdate = firstdate.strftime('%d.%m.%Y')
+    else:
+        dates = firstdate.split("-")
+    sql = "select cast(sum as int), comment, date from money_analiz where type = '" + type + "' and date = '" + firstdate + "'"
+    if len(dates) == 2:
+        typeSQL = 1
+        sDate = dates[0]
+        eDate = dates[1]
+        sql = "SELECT cast(sum as int),comment,date from money_analiz where type = '" + type + "' and date between '" + sDate + "' and '"+eDate+"' group by date,sum,comment"
     conn = psycopg2.connect(**connection_parameters)
-    delta = 0
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "select SUM(cast(sum as int)) from money_analiz where type = '" +
-            type + "' and date = '" + firstdate.strftime('%Y-%m-%d') + "'")
-        for row in cursor:
-            delta = row[0]
-    conn.close()
-    return delta
+    message = ''
+    messageTxt=''
+    summa = 0
+    
+    try:
+        with conn.cursor() as cursor:                     
+            cursor.execute(sql)
+            for row in cursor:
+                if typeSQL == 1:
+                    messageTxt +=  '❗'+row[2].strftime('%d.%m.%Y')+ '\n'
+                messageTxt += str(row[0]) + ' ' + row[1] +'\n'
+                summa += row[0]
+        conn.close()
+    except:
+        write_msg('Допустил ошибку')
+    if summa != 0:
+        if typeSQL == 0:
+            message = '❗'+firstdate+'\n'
+        message += messageTxt + '📌Всего: ' + str(summa)
+    else:
+        message = 'пусто'
+    return message
 
 
 try:
@@ -163,43 +91,47 @@ try:
                 request = event.obj.text
                 commentar = request.split("*")
                 txt = commentar[0].split(" ")
-                # расход доход
-                # Перевод
-                if txt[0].lower() == 'баланс':
-                    message = 'Сегодня: \n'
-                    now = datetime.now()
-                    message += 'Расходы: ' + str(
-                        select_delta_date('Расходы', now)) + '\n'
-                    write_msg(select_from_acc(message))
+                if len(txt) == 2: 
+                    match txt[0]:
+                        case 'баланс':
+                            date = txt[1]
+                            match date:
+                                case 'сегодня':
+                                    date = datetime.now()
+                                case 'вчера':
+                                    date = datetime.now() - timedelta(days=1)
+                            message = str(select_delta_date('Spend', date))
+                            write_msg(message)
+                        case  _:
+                            spent = txt[1]
+                            date = txt[0]
+                            match date:
+                                case 'сегодня':
+                                    date = datetime.now()
+                                case 'вчера':
+                                    date = datetime.now() - timedelta(days=1)
+                            comment = commentar[1]
+                            conn = psycopg2.connect(**connection_parameters)
+                            try:
+                                with conn.cursor() as cursor:
+                                    values = [
+                                        ('Spend', spent, date, comment)]
+                                    conn.autocommit = True
+                                    insert = sql.SQL('INSERT INTO money_analiz (type,sum,date,comment) VALUES {}').format(
+                                        sql.SQL(',').join(map(sql.Literal, values)))
+                                    cursor.execute(insert)
+                                    conn.close()
+                            except:
+                                   write_msg('Допустил ошибку')
+                            message = spent + '\n' + comment
+                            write_msg(message)
+                elif txt[0] == 'забыл':
+                    write_msg('баланс вчера' + '\n' + 'баланс 29.03.2023' + '\n' + 'сегодня 500*комент' + '\n' + '01.03.2023 600*комент')
+                elif txt[0] == 'удали':
+                    delete_last()
+                    write_msg('готово')
                 else:
-                    if len(txt) == 3:
-                        # Сумма
-                        spent = txt[1]
-                        date = txt[0]
-                        # Проверка есть ли комент
-                        comment = check_comment(commentar)
-
-                        # Запись в базу
-                        conn = psycopg2.connect(**connection_parameters)
-                        with conn.cursor() as cursor:
-                            values = [('Spend', spent, '', date, '', comment)]
-                            conn.autocommit = True
-                            insert = sql.SQL(
-                                'INSERT INTO money_analiz (type,sum,type_money,date,category,comment) VALUES {}'
-                            ).format(
-                                sql.SQL(',').join(map(sql.Literal, values)))
-                            cursor.execute(insert)
-                        conn.close()
-
-                        # Отправка сообщения
-                        message = 'Сумма: ' + spent + 'р.'
-                        if comment != '':
-                            message += 'Примечание: ' + comment + '\n'
-                        else:
-                            message += '\n'
-                        write_msg(message)
-                    else:
-                        write_msg('Допустил ошибку')
+                    write_msg('Допустил ошибку')
 except (requests.exceptions.ConnectionError, TimeoutError,
         requests.exceptions.Timeout, requests.exceptions.ConnectTimeout,
         requests.exceptions.ReadTimeout):
